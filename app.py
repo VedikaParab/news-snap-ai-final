@@ -9,6 +9,7 @@ from newspaper import Article
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
+from prompts import SUPPORTED_LANGUAGES, ENUM_FIELDS_NOTE, lang_instruction
 
 load_dotenv()
 groq_api_key   = os.getenv("GROQ_API_KEY")
@@ -30,7 +31,8 @@ st.markdown("""
 }
 html,body,[class*="css"]{font-family:'DM Sans',sans-serif;color:var(--ink);}
 #MainMenu,footer,header{visibility:hidden;}
-.block-container{max-width:1160px!important;padding:0 2rem 4rem;}
+.block-container{max-width:98vw!important;padding:0 2.5rem 4rem!important;}
+section[data-testid="stSidebar"]{display:none!important;}
 
 body::before{content:'';position:fixed;inset:0;background-color:#fafaf8;background-image:radial-gradient(circle,#c8c8c0 1px,transparent 1px);background-size:22px 22px;z-index:-2;pointer-events:none;}
 body::after{content:'';position:fixed;inset:0;background:linear-gradient(180deg,rgba(250,250,248,0) 0%,rgba(250,250,248,0.4) 40%,rgba(250,250,248,0.85) 100%);z-index:-1;pointer-events:none;}
@@ -112,6 +114,13 @@ body::after{content:'';position:fixed;inset:0;background:linear-gradient(180deg,
 .entity-role-pill{font-size:0.74rem;color:var(--ink-3);}
 
 .footer{border-top:2px solid var(--ink);padding-top:1rem;margin-top:3rem;display:flex;justify-content:space-between;align-items:center;font-size:0.72rem;color:var(--ink-3);letter-spacing:0.04em;}
+
+/* language pill — floats in masthead right corner */
+.lang-pill-wrap{display:flex;align-items:center;gap:0.5rem;}
+.lang-pill-label{font-size:0.68rem;color:var(--ink-3);letter-spacing:0.06em;text-transform:uppercase;}
+.stSelectbox>div>div{font-family:'JetBrains Mono',monospace!important;font-size:0.78rem!important;
+  background:var(--paper-2)!important;border:1.5px solid var(--border)!important;
+  border-radius:3px!important;padding:0.3rem 0.7rem!important;min-height:0!important;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -139,13 +148,88 @@ if not groq_api_key:
 
 llm = ChatGroq(model="llama-3.1-8b-instant", api_key=groq_api_key, temperature=0.2, timeout=60, max_retries=3)
 
+# ── LANGUAGE PILL — inline in a narrow Streamlit column, overlaid on masthead ──
+# We render a compact selectbox in a right-aligned column that sits visually
+# in the top-right of the page, styled to look like a small pill.
+_lang_col_spacer, _lang_col = st.columns([6, 1])
+with _lang_col:
+    lang_display = st.selectbox(
+        label="🌐 Lang",
+        options=list(SUPPORTED_LANGUAGES.keys()),
+        index=0,
+        key="selected_language",
+        help="Output language for the analysis",
+    )
+
+# Resolve to (BCP-47 code, native name)
+lang_code, lang_name = SUPPORTED_LANGUAGES[lang_display]
+
+# RTL languages — inject CSS so text renders correctly
+RTL_LANGS = {"ar", "he", "fa", "ur"}
+if lang_code in RTL_LANGS:
+    st.markdown(
+        '<style>[data-testid="stMarkdownContainer"] p,'
+        '[data-testid="stMarkdownContainer"] li {direction:rtl;text-align:right;}</style>',
+        unsafe_allow_html=True,
+    )
+
 # ── HELPERS ──
 def safe_json(raw):
-    raw = raw.strip()
-    if raw.startswith("```"):
-        parts = raw.split("```"); raw = parts[1] if len(parts) > 1 else raw
-        if raw.startswith("json"): raw = raw[4:]
-    return json.loads(raw.strip())
+    """
+    Robustly parse JSON from an LLM response.
+    Handles: plain JSON, ```json...```, ```...```, prose before/after the JSON,
+    and non-English preamble the model sometimes prepends in multilingual mode.
+    Raises json.JSONDecodeError with context if all strategies fail.
+    """
+    import re
+    text = raw.strip()
+
+    # Strategy 1 — response is already clean JSON
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2 — strip ```json ... ``` or ``` ... ``` fence
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fence:
+        try:
+            return json.loads(fence.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3 — find the first {...} object in the string
+    m = re.search(r"(\{[\s\S]*\})", text)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 4 — find the first [...] array in the string
+    m = re.search(r"(\[[\s\S]*\])", text)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 5 — partial recovery: LLM truncated mid-array, salvage complete objects
+    # Find all complete {...} objects inside what looks like an array
+    objects = re.findall(r'\{[^{}]*\}', text)
+    recovered = []
+    for obj in objects:
+        try:
+            recovered.append(json.loads(obj))
+        except json.JSONDecodeError:
+            pass
+    if recovered:
+        return recovered
+
+    # All strategies failed — raise so the except blocks in callers can log it
+    raise json.JSONDecodeError(
+        f"safe_json: could not parse — raw[:{min(200,len(text))}]: {text[:200]}", text, 0
+    )
 
 def reading_time(t): return max(1, round(len(t.split()) / 200))
 def word_count(t):   return len(t.split())
@@ -173,41 +257,118 @@ def extract_article(url):
 
 # ── LLM CALLS ──
 @st.cache_data(show_spinner=False)
-def analyze_article(text):
-    r = llm.invoke(f"""Analyze this news article. Return ONLY valid JSON, no markdown.
+def analyze_article(text, lang_code="en", lang_name="English"):
+    lang_dir = lang_instruction(lang_code, lang_name)
+    enum_note = ENUM_FIELDS_NOTE.format(lang_name=lang_name)
+    r = llm.invoke(
+        f"""{lang_dir}Analyze this news article. Return ONLY valid JSON, no markdown.
+{enum_note}
 Keys: "summary"(2-3 sentences),"bullets"(5 strings),"sentiment"("Positive"|"Negative"|"Neutral"),
 "category"("Politics"|"Business"|"Technology"|"Science"|"Sports"|"Health"|"World"|"Environment"|"Crime"|"Culture"),
 "reading_complexity"("Easy"|"Moderate"|"Complex")
-Article:{text[:8000]}""")
-    return safe_json(r.content)
-
-@st.cache_data(show_spinner=False)
-def generate_context_cards(text):
-    r = llm.invoke(f"""Identify exactly 3 key concepts needed to understand this article.
-Return ONLY a JSON array of 3 objects:{{"term":str,"one_liner":str(<15 words),"explanation":str(2-3 sentences)}}
-Article:{text[:6000]}""")
-    return safe_json(r.content)
-
-@st.cache_data(show_spinner=False)
-def generate_timeline(text):
-    r = llm.invoke(f"""Extract chronological timeline from this article.
-Return ONLY a JSON array (3-6 items):{{"when":str,"event":str(<20 words)}}. If none, return [].
-Article:{text[:6000]}""")
+Article:{text[:8000]}"""
+    )
     result = safe_json(r.content)
-    return result if isinstance(result, list) else []
+    # If LLM returned a list instead of a dict, try the first dict element
+    if isinstance(result, list):
+        result = next((x for x in result if isinstance(x, dict)), {})
+    if not isinstance(result, dict):
+        result = {}
+    # Ensure bullets is always a list of strings
+    bullets = result.get("bullets", [])
+    if not isinstance(bullets, list):
+        bullets = []
+    result["bullets"] = [str(b) for b in bullets if b]
+    return result
 
 @st.cache_data(show_spinner=False)
-def extract_entities(text):
-    r = llm.invoke(f"""Extract the TOP 5 most important named entities from this article.
-Return ONLY a JSON array of exactly 5:{{"name":str,"type":"person"|"org"|"place","role":str(<10 words)}}
-Article:{text[:6000]}""")
+def generate_context_cards(text, lang_code="en", lang_name="English"):
+    lang_dir = lang_instruction(lang_code, lang_name)
+    r = llm.invoke(
+        f"""{lang_dir}Identify exactly 3 key concepts needed to understand this article.
+IMPORTANT: Return ONLY a raw JSON array. No preamble, no markdown fences.
+Start with [ and end with ]. Be CONCISE — keep explanations SHORT (max 1 sentence).
+Each object (keys in English, values in {lang_name}):
+{{"term":str,"one_liner":str(under 10 words),"explanation":str(1 sentence only, max 20 words)}}
+Article:{text[:3000]}"""
+    )
     result = safe_json(r.content)
-    return (result if isinstance(result, list) else [])[:5]
+    # Unwrap if LLM returned a dict wrapping the array
+    if isinstance(result, dict):
+        for v in result.values():
+            if isinstance(v, list):
+                result = v
+                break
+        else:
+            return []
+    # Flatten nested arrays e.g. [[{...}]] → [{...}]
+    if isinstance(result, list) and result and isinstance(result[0], list):
+        result = [item for sublist in result for item in sublist]
+    # Keep only valid dicts with a "term" key
+    return [c for c in result if isinstance(c, dict) and "term" in c][:3]
 
 @st.cache_data(show_spinner=False)
-def generate_followup_questions(summary):
-    r = llm.invoke(f"""Generate exactly 3 thought-provoking follow-up questions for a curious reader.
-Format: numbered list (1. 2. 3.) only. Summary:{summary}""")
+def generate_timeline(text, lang_code="en", lang_name="English"):
+    lang_dir = lang_instruction(lang_code, lang_name)
+    r = llm.invoke(
+        f"""{lang_dir}You are extracting a chronological timeline from a news article.
+TASK: Find ALL dates, times, years, or time references mentioned in the article and pair each with what happened at that time.
+- The "when" field must contain the date/time exactly as written in the article (you may translate surrounding words to {lang_name} but keep numbers/years as-is).
+- The "event" field must be written in {lang_name}, max 20 words.
+- Return 3 to 6 items. If the article has fewer than 3 explicit dates, infer approximate timeframes from context (e.g. "Earlier this year", "Last month").
+- NEVER return an empty array []. Always extract at least 2 items even from sparse articles.
+- Return ONLY a valid JSON array. No markdown, no explanation.
+Format: [{{"when":str,"event":str}}]
+Article:{text[:6000]}"""
+    )
+    result = safe_json(r.content)
+    if isinstance(result, dict):
+        for v in result.values():
+            if isinstance(v, list):
+                result = v
+                break
+        else:
+            return []
+    if isinstance(result, list) and result and isinstance(result[0], list):
+        result = [item for sublist in result for item in sublist]
+    return [e for e in result if isinstance(e, dict) and "when" in e and "event" in e]
+
+@st.cache_data(show_spinner=False)
+def extract_entities(text, lang_code="en", lang_name="English"):
+    lang_dir = lang_instruction(lang_code, lang_name)
+    r = llm.invoke(
+        f"""{lang_dir}Extract the TOP 5 most important named entities from this article.
+IMPORTANT: Return ONLY a raw JSON array — no preamble, no explanation, no markdown fences.
+Start your response with [ and end with ].
+Keep "name" as written in the article. Write "role" in {lang_name} (under 10 words).
+Each object MUST be: {{"name":str,"type":"person"|"org"|"place","role":str}}
+Article:{text[:6000]}"""
+    )
+    result = safe_json(r.content)
+    # Unwrap if LLM returned a dict with a key containing the list
+    if isinstance(result, dict):
+        for v in result.values():
+            if isinstance(v, list):
+                result = v
+                break
+        else:
+            return []
+    # Flatten nested arrays e.g. [[{...}]] → [{...}]
+    if isinstance(result, list) and result and isinstance(result[0], list):
+        result = [item for sublist in result for item in sublist]
+    # Keep only valid dicts with required keys
+    valid = [e for e in result if isinstance(e, dict) and "name" in e and "type" in e]
+    return valid[:5]
+
+@st.cache_data(show_spinner=False)
+def generate_followup_questions(summary, lang_code="en", lang_name="English"):
+    lang_dir = lang_instruction(lang_code, lang_name)
+    r = llm.invoke(
+        f"""{lang_dir}Generate exactly 3 thought-provoking follow-up questions for a curious reader.
+Write the questions in {lang_name}.
+Format: numbered list (1. 2. 3.) only — no preamble, no extra text.
+Summary:{summary}"""
+    )
     qs = []
     for line in r.content.splitlines():
         line = line.strip()
@@ -229,7 +390,8 @@ def tavily_search(query, max_results=4):
         return data.get("results", []), data.get("answer", "")
     except: return [], ""
 
-def chat_with_search(question, article_text, article_summary, chat_history):
+def chat_with_search(question, article_text, article_summary, chat_history,
+                     lang_code="en", lang_name="English"):
     search_results, tavily_answer = tavily_search(f"{question} {article_summary[:120]}")
     search_ctx = ""
     sources = []
@@ -242,8 +404,10 @@ def chat_with_search(question, article_text, article_summary, chat_history):
         f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}"
         for m in chat_history[-6:]
     ])
-    prompt = f"""You are a sharp news analyst. Answer using BOTH the article AND web search results.
+    lang_dir = lang_instruction(lang_code, lang_name)
+    prompt = f"""{lang_dir}You are a sharp news analyst. Answer using BOTH the article AND web search results.
 Be direct, concise (3-5 sentences). Cite sources naturally. Highlight new info from web beyond article.
+{'Respond entirely in ' + lang_name + '.' if lang_code != 'en' else ''}
 
 ARTICLE:{article_text[:3500]}
 
@@ -280,7 +444,8 @@ col1, col2 = st.columns([5, 1])
 with col1: generate = st.button("⚡  Analyse Article", use_container_width=True)
 with col2:
     if st.button("✕  Clear", use_container_width=True):
-        for k in ["article_text","result","cards","timeline","entities","domain","rt","wc","url_analysed","chat_history"]:
+        for k in ["article_text","result","cards","timeline","entities","domain","rt","wc",
+                  "url_analysed","chat_history","lang_code","lang_name"]:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -291,23 +456,33 @@ if generate:
         text, err = extract_article(url)
     if err: st.error(f"**Could not extract article.** {err}"); st.stop()
 
-    st.session_state.update({"article_text": text, "url_analysed": url, "chat_history": []})
+    st.session_state.update({"article_text": text, "url_analysed": url, "chat_history": [],
+                              "lang_code": lang_code, "lang_name": lang_name})
 
     with st.spinner("Running AI analysis…"):
-        try: result = analyze_article(text)
+        try: result = analyze_article(text, lang_code, lang_name)
         except Exception as e: st.error(f"Analysis failed: {e}"); st.stop()
 
     with st.spinner("Building context cards…"):
-        try: cards = generate_context_cards(text)
-        except: cards = []
+        try:
+            cards = generate_context_cards(text, lang_code, lang_name)
+        except Exception as e:
+            st.warning(f"Context cards unavailable: {e}")
+            cards = []
 
     with st.spinner("Extracting timeline…"):
-        try: timeline = generate_timeline(text)
-        except: timeline = []
+        try:
+            timeline = generate_timeline(text, lang_code, lang_name)
+        except Exception as e:
+            st.warning(f"Timeline unavailable: {e}")
+            timeline = []
 
     with st.spinner("Extracting key entities…"):
-        try: entities = extract_entities(text)
-        except: entities = []
+        try:
+            entities = extract_entities(text, lang_code, lang_name)
+        except Exception as e:
+            st.warning(f"Entities unavailable: {e}")
+            entities = []
 
     st.session_state.update({"result": result, "cards": cards, "timeline": timeline, "entities": entities,
                               "domain": get_domain(url), "rt": reading_time(text), "wc": word_count(text)})
@@ -324,11 +499,26 @@ rt       = st.session_state.get("rt", 1)
 wc       = st.session_state.get("wc", 0)
 text     = st.session_state.get("article_text", "")
 url      = st.session_state.get("url_analysed", "")
+# Restore the language that was active when analysis ran — keeps display
+# consistent even if the user changes the selector mid-session.
+_saved_lang_code = st.session_state.get("lang_code", "en")
+_saved_lang_name = st.session_state.get("lang_name", "English")
 sent     = result.get("sentiment", "Neutral")
 cat      = result.get("category", "—")
 complexity = result.get("reading_complexity", "—")
+# Native language label for the badge (e.g. "हिंदी", "Español")
+_, _lang_native = SUPPORTED_LANGUAGES.get(
+    next((k for k, v in SUPPORTED_LANGUAGES.items() if v[0] == _saved_lang_code), "English"),
+    ("en", "English"),
+)
 
-# STATS BAR
+# STATS BAR — adds language badge when non-English
+_lang_badge = (
+    f'<div class="stat-divider"></div>'
+    f'<div class="stat-item"><span class="stat-val" style="font-size:0.85rem;margin-top:4px">'
+    f'{_lang_native}</span><span class="stat-lbl">language</span></div>'
+    if _saved_lang_code != "en" else ""
+)
 st.markdown(f"""<div class="reveal-2"><div class="stats-bar">
   <div class="stat-item"><span class="stat-val">{rt}</span><span class="stat-lbl">min read</span></div>
   <div class="stat-divider"></div>
@@ -341,6 +531,7 @@ st.markdown(f"""<div class="reveal-2"><div class="stats-bar">
   <div class="stat-item"><span class="stat-val" style="font-size:0.9rem;margin-top:4px">{complexity}</span><span class="stat-lbl">complexity</span></div>
   <div class="stat-divider"></div>
   <div class="stat-item"><span class="meta-chip {sent.lower()}" style="margin-top:6px;display:inline-block">{sent}</span><span class="stat-lbl" style="display:block;margin-top:4px">sentiment</span></div>
+  {_lang_badge}
 </div></div>""", unsafe_allow_html=True)
 
 # CONTEXT CARDS
@@ -391,6 +582,8 @@ if entities:
     st.markdown("""<div class="reveal-5"><div class="section-header"><span class="section-kicker">Who & Where</span><span class="section-title">&nbsp;Key Entities</span><div class="section-header-rule"></div></div></div>""", unsafe_allow_html=True)
     eh = '<div class="reveal-5"><div class="entities-strip">'
     for e in entities[:5]:
+        if not isinstance(e, dict):
+            continue
         etype = e.get("type", "").lower()
         eh += f'<div class="entity-pill"><span class="entity-badge {etype}">{etype.upper()}</span><span class="entity-name-pill">{e.get("name","")}</span><span class="entity-role-pill">— {e.get("role","")}</span></div>'
     eh += '</div></div>'
@@ -399,7 +592,7 @@ if entities:
 # FOLLOW-UP QUESTIONS
 st.markdown("""<div class="reveal-5"><div class="section-header"><span class="section-kicker">Go Deeper</span><span class="section-title">&nbsp;Questions to Explore</span><div class="section-header-rule"></div></div></div>""", unsafe_allow_html=True)
 with st.spinner("Generating questions…"):
-    try: questions = generate_followup_questions(result.get("summary", ""))
+    try: questions = generate_followup_questions(result.get("summary", ""), _saved_lang_code, _saved_lang_name)
     except: questions = []
 qh = "<div class='reveal-5'>"
 for i, q in enumerate(questions, 1):
@@ -441,6 +634,8 @@ with st.form("chat_form", clear_on_submit=True):
 
 if submitted and hidden_q.strip() and "article_text" in st.session_state:
     st.session_state["chat_history"].append({"role": "user", "content": hidden_q})
+    _chat_lang_code = st.session_state.get("lang_code", "en")
+    _chat_lang_name = st.session_state.get("lang_name", "English")
     with st.spinner("Thinking…"):
         try:
             answer, sources = chat_with_search(
@@ -448,6 +643,8 @@ if submitted and hidden_q.strip() and "article_text" in st.session_state:
                 st.session_state["article_text"],
                 st.session_state["result"].get("summary", ""),
                 st.session_state["chat_history"],
+                _chat_lang_code,
+                _chat_lang_name,
             )
             st.session_state["chat_history"].append(
                 {"role": "assistant", "content": answer, "sources": sources}

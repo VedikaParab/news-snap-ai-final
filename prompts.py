@@ -1,6 +1,46 @@
 # prompts.py
 from langchain_core.prompts import PromptTemplate
 
+# ── LANGUAGE SUPPORT ────────────────────────────────────────────────────────
+# Maps display name → (BCP-47 code, native name shown in UI)
+SUPPORTED_LANGUAGES = {
+    "English":    ("en", "English"),
+    "Hindi":      ("hi", "हिंदी"),
+    "Spanish":    ("es", "Español"),
+    "French":     ("fr", "Français"),
+    "German":     ("de", "Deutsch"),
+    "Arabic":     ("ar", "العربية"),
+    "Portuguese": ("pt", "Português"),
+    "Japanese":   ("ja", "日本語"),
+    "Chinese":    ("zh", "中文"),
+    "Tamil":      ("ta", "தமிழ்"),
+    "Telugu":     ("te", "తెలుగు"),
+    "Bengali":    ("bn", "বাংলা"),
+}
+
+# Sentinel values that must stay in English regardless of output language
+# because they feed into Python logic (sentiment chip CSS, category label)
+ENUM_FIELDS_NOTE = (
+    'IMPORTANT: The "sentiment" value MUST be exactly one of: '
+    '"Positive", "Negative", or "Neutral" (English, unchanged). '
+    'The "category" value MUST be exactly one of: "Politics", "Business", '
+    '"Technology", "Science", "Sports", "Health", "World", "Environment", '
+    '"Crime", "Culture" (English, unchanged). '
+    'The "reading_complexity" value MUST be exactly one of: '
+    '"Easy", "Moderate", "Complex" (English, unchanged). '
+    'All other string values ("summary", "bullets", "term", "one_liner", '
+    '"explanation", "event", "role") MUST be in {lang_name}.'
+)
+
+def lang_instruction(lang_code: str, lang_name: str) -> str:
+    """Returns a language directive string to prepend to any prompt."""
+    if lang_code == "en":
+        return ""
+    return (
+        f"You MUST write ALL text output in {lang_name} ({lang_code}). "
+        f"Do not use English for any output except where explicitly noted below.\n"
+    )
+
 MAIN_SYSTEM_PROMPT = PromptTemplate(
     input_variables=["country", "topic", "context"],
     template="""You are an AI assistant specialized in providing comprehensive news summaries and in-depth analysis for {country} on the topic of {topic}. Analyze the given news articles and provide a well-structured summary and analysis. Use the following context:
@@ -101,9 +141,10 @@ Do not include any titles or headings in your response, use the following format
 """,
 )
 
-FOLLOW_UP_QUESTIONS_PROMPT = """Based on this news summary, generate exactly 3 thought-provoking follow-up questions a curious reader might research next.
+FOLLOW_UP_QUESTIONS_PROMPT = """{lang_instruction}Based on this news summary, generate exactly 3 thought-provoking follow-up questions a curious reader might research next.
 Each question should push beyond the article — asking about implications, historical parallels, opposing views, or unresolved tensions.
+Write the questions in {lang_name}.
 Format: numbered list only (1. 2. 3.) — no preamble, no extra text.
- 
+
 Summary:
 {summary}"""
