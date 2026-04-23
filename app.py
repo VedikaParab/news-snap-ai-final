@@ -10,6 +10,13 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from prompts import SUPPORTED_LANGUAGES, ENUM_FIELDS_NOTE, lang_instruction
+import textwrap
+import io
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PILLOW_AVAILABLE = True
+except ImportError:
+    PILLOW_AVAILABLE = False
 
 load_dotenv()
 groq_api_key   = os.getenv("GROQ_API_KEY")
@@ -81,7 +88,8 @@ body::after{content:'';position:fixed;inset:0;background:linear-gradient(180deg,
 .context-card-oneliner{font-size:0.8rem;font-weight:600;color:var(--ink-2);margin-bottom:0.6rem;line-height:1.4;padding-bottom:0.6rem;border-bottom:1px solid var(--border);}
 .context-card-body{font-size:0.8rem;color:var(--ink-3);line-height:1.65;}
 
-.summary-block{background:var(--ink);color:white;padding:1.8rem 2rem;border-radius:4px;margin-bottom:1rem;position:relative;overflow:hidden;}
+.summary-block{background:var(--ink);color:white;padding:1.8rem 2rem;border-radius:4px;margin-bottom:1rem;position:relative;overflow:hidden;width:100%;box-sizing:border-box;display:block;}
+[data-testid="stMarkdownContainer"]:has(.summary-block){width:100%!important;}
 .summary-block::before{content:'\201C';position:absolute;top:-0.5rem;left:1.2rem;font-family:'Playfair Display',serif;font-size:7rem;color:rgba(255,255,255,0.07);line-height:1;pointer-events:none;}
 .summary-block p{font-family:'Playfair Display',serif;font-size:1.15rem;line-height:1.75;color:rgba(255,255,255,0.92);margin:0;position:relative;z-index:1;}
 
@@ -121,14 +129,95 @@ body::after{content:'';position:fixed;inset:0;background:linear-gradient(180deg,
 .stSelectbox>div>div{font-family:'JetBrains Mono',monospace!important;font-size:0.78rem!important;
   background:var(--paper-2)!important;border:1.5px solid var(--border)!important;
   border-radius:3px!important;padding:0.3rem 0.7rem!important;min-height:0!important;}
+
+/* ── Full-width summary fix ── */
+/* Streamlit wraps every st.markdown in stMarkdownContainer which can inherit
+   narrow widths from parent flex/column layouts. Force the summary to always
+   fill the full block container. */
+.summary-block,.summary-fullwidth-wrap{
+    width:100%!important;
+    min-width:0!important;
+    box-sizing:border-box!important;
+    display:block!important;
+}
+/* The Streamlit element div that wraps the summary markdown */
+div[data-testid="stMarkdownContainer"]:has(.summary-block){
+    width:100%!important;
+    min-width:0!important;
+    display:block!important;
+}
+div[data-testid="element-container"]:has(.summary-block){
+    width:100%!important;
+    min-width:0!important;
+    display:block!important;
+}
+/* Ensure paragraph text fills the dark block */
+.summary-block p{
+    width:100%!important;
+    max-width:100%!important;
+    white-space:normal!important;
+    word-wrap:break-word!important;
+    overflow-wrap:break-word!important;
+}
+
+/* ── Footer URL fix ── */
+.footer{border-top:2px solid var(--ink)!important;padding-top:1rem!important;
+  margin-top:3rem!important;display:flex!important;flex-direction:column!important;gap:0.5rem!important;
+  font-size:0.72rem!important;color:var(--ink-3)!important;letter-spacing:0.04em!important;}
+.footer-url{word-break:break-all!important;color:var(--accent)!important;}
+
+/* ── Input row: align language dropdown with URL input card ── */
+/* Kill the default top padding Streamlit adds to selectbox columns */
+div[data-testid="column"]:last-child > div:first-child {
+  padding-top: 0 !important;
+}
+div[data-testid="column"]:last-child .stSelectbox > div > div {
+  margin-top: 0.35rem !important;
+  background: var(--card-bg) !important;
+  border: 1.5px solid var(--border) !important;
+  border-radius: 4px !important;
+  box-shadow: var(--shadow) !important;
+  font-family: 'DM Sans', sans-serif !important;
+  font-size: 0.85rem !important;
+  min-height: 3.2rem !important;
+  padding: 0.6rem 1rem !important;
+}
+
+/* ── Kill extra space below summary iframe ── */
+iframe:not([title="components.html"]) {
+    margin-bottom: 0 !important;
+    display: block !important;
+}
+div[data-testid="element-container"]:has(iframe:not([title="components.html"])) {
+    margin-bottom: 0 !important;
+    padding-bottom: 0 !important;
+}
+
+/* ── Export panel ── */
+.export-panel{background:var(--card-bg);border:1.5px solid var(--border);border-radius:4px;
+  padding:1.4rem 1.8rem 0.6rem;margin-bottom:1rem;box-shadow:var(--shadow);}
+.export-panel-row{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;}
+.export-item{display:flex;align-items:flex-start;gap:1rem;}
+.export-icon{font-size:1.6rem;line-height:1;padding-top:2px;flex-shrink:0;}
+.export-meta{display:flex;flex-direction:column;gap:0.25rem;}
+.export-title{font-family:"Playfair Display",serif;font-size:1.05rem;color:var(--ink);font-weight:700;}
+.export-desc{font-size:0.76rem;color:var(--ink-3);line-height:1.5;}
 </style>
 """, unsafe_allow_html=True)
 
 # ── TICKER + MASTHEAD ──
 now = datetime.datetime.now()
-TICKER = [("LIVE","AI-powered editorial analysis engine"),("⚡","Paste any URL — instant intelligence"),
-          ("NEW","Research Chatbot with live Tavily web search"),("POWERED BY","Groq · LLaMA 3.1 · Tavily Search"),
-          ("EXPORT","Download full analysis reports as .txt")]
+TICKER = [
+    ("⚡", "Paste any news URL — get AI analysis in seconds"),
+    ("📰", "Auto-extracts articles via Newspaper3k + BeautifulSoup"),
+    ("🧠", "Summaries · Key Points · Timeline · Entities · Context Cards"),
+    ("🌐", "12 languages supported — Hindi, Tamil, Arabic, Japanese & more"),
+    ("💬", "Research Chatbot powered by live Tavily web search"),
+    ("📊", "Sentiment · Category · Reading complexity — auto-detected"),
+    ("🖼",  "Shareable PNG cards — one click, ready to post"),
+    ("⬇",  "Export full editorial reports as .txt"),
+    ("🔥", "Powered by Groq LLaMA 3.1 · Tavily · Streamlit"),
+]
 ticker_html = '<div class="ticker-wrap"><div class="ticker-inner">' + (
     "".join(f'<span class="ticker-item"><strong>{k}</strong> &nbsp;{v}&nbsp;<span class="ticker-sep"> /// </span></span>'
             for k, v in TICKER) * 4
@@ -148,13 +237,12 @@ if not groq_api_key:
 
 llm = ChatGroq(model="llama-3.1-8b-instant", api_key=groq_api_key, temperature=0.2, timeout=60, max_retries=3)
 
-# ── LANGUAGE PILL — inline in a narrow Streamlit column, overlaid on masthead ──
-# We render a compact selectbox in a right-aligned column that sits visually
-# in the top-right of the page, styled to look like a small pill.
-_lang_col_spacer, _lang_col = st.columns([6, 1])
+# ── INPUT ROW: URL input + language selector side by side ──
+_url_col, _lang_col = st.columns([5, 1])
 with _lang_col:
     lang_display = st.selectbox(
-        label="🌐 Lang",
+        label="language",
+        label_visibility="collapsed",
         options=list(SUPPORTED_LANGUAGES.keys()),
         index=0,
         key="selected_language",
@@ -419,6 +507,283 @@ Question: {question}
 Answer:"""
     return llm.invoke(prompt).content, sources
 
+
+def _pixel_wrap(draw, text, font, max_width):
+    """Wrap text by actual rendered pixel width — never by char count."""
+    words = text.split()
+    lines = []
+    current = ""
+    for word in words:
+        candidate = (current + " " + word).strip()
+        if draw.textlength(candidate, font=font) <= max_width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [text]
+
+
+# Per-language font paths — DejaVu for Latin, FreeSans for Indic,
+# Unifont for Telugu/Arabic, NotoSansCJK for East Asian scripts
+_LANG_FONT_MAP = {
+    "en": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "hi": "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "ta": "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "bn": "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "te": "/usr/share/fonts/opentype/unifont/unifont.otf",
+    "ar": "/usr/share/fonts/opentype/unifont/unifont.otf",
+    "ja": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "zh": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "ko": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "pt": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "es": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "fr": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "de": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+}
+_LANG_SERIF_MAP = {
+    "ja": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "zh": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+}
+
+def generate_share_card(summary, domain, category, sentiment, url,
+                         bullets=None, complexity="", rt=1, wc=0,
+                         entities=None, lang_name="English", cards=None,
+                         lang_code="en"):
+    """Generate a rich shareable PNG with all article info."""
+    W = 1200
+    bullets  = bullets  or []
+    entities = entities or []
+    cards    = cards    or []
+
+    INK    = (13,  13,  15)
+    PAPER  = (250, 250, 248)
+    ACCENT = (200, 57,  43)
+    INK2   = (58,  58,  68)
+    INK3   = (122, 122, 136)
+    BORDER = (224, 224, 216)
+    WHITE  = (255, 255, 255)
+    SENT_COLORS = {
+        "positive": (26,  122, 74),
+        "negative": (200, 57,  43),
+        "neutral":  (58,  110, 168),
+    }
+
+    PAD   = 54
+    INNER = W - PAD * 2
+
+    try:
+        F = "/usr/share/fonts/truetype/dejavu/"
+        # Logo/kicker always use DejaVu (English only, always Latin)
+        f_logo  = ImageFont.truetype(F+"DejaVuSerif-Bold.ttf",   44)
+        f_mono  = ImageFont.truetype(F+"DejaVuSansMono.ttf",     14)
+        f_kick  = ImageFont.truetype(F+"DejaVuSansMono-Bold.ttf",13)
+        # Body/small use language-aware font so non-Latin scripts render correctly
+        _body_fp  = _LANG_FONT_MAP.get(lang_code, F+"DejaVuSans.ttf")
+        f_body  = ImageFont.truetype(_body_fp, 22)
+        f_small = ImageFont.truetype(_body_fp, 17)
+    except Exception:
+        f_logo = f_body = f_small = f_mono = f_kick = ImageFont.load_default()
+
+    # Pixel-accurate wrap: usable width = 1200 - 54*2(PAD) - 20*2(inner pad) = 1052px
+    _tmp_img  = Image.new("RGB", (W, 10))
+    _tmp_draw = ImageDraw.Draw(_tmp_img)
+    SUM_INNER_W  = W - PAD*2 - 40   # 40 = 20px left + 20px right padding inside dark block
+    BULLET_MAX_W = INNER - 60        # badge width ~40px + gap 10px + margin
+    CARD_TEXT_W  = (INNER - 20) // 3 - 20  # card inner usable width
+    sum_lines    = _pixel_wrap(_tmp_draw, summary, f_body, SUM_INNER_W)
+    # Use pixel-wrap for bullets so non-Latin scripts aren't over-truncated
+    bullet_rows  = [_pixel_wrap(_tmp_draw, str(b), f_small, BULLET_MAX_W)[0]
+                    for b in bullets[:4]]
+    card_rows    = []
+    for c in cards[:3]:
+        if isinstance(c, dict) and "term" in c:
+            # Use pixel-wrap for one_liner and explanation to handle non-Latin
+            exp_raw = c.get("explanation", "")
+            card_rows.append((c.get("term", ""), c.get("one_liner", ""), exp_raw))
+
+    H_HEADER  = 110
+    H_STATS   = 68
+    H_GAP     = 16
+    H_SUM_HDR = 26
+    # Indic/Arabic/CJK scripts need taller line height than Latin
+    _line_h   = 42 if lang_code in {'hi','ta','bn','te','ar'} else 36 if lang_code in {'ja','zh','ko'} else 32
+    H_SUM_BLK = len(sum_lines)*_line_h + 36  # 36 = top+bottom padding inside dark block
+    H_KP_HDR  = 26
+    H_KP      = len(bullet_rows)*(_line_h - 2) + 10
+    H_ENT     = 58 if entities else 0
+    H_CTX     = (80 + 30) if card_rows else 0
+    H_FOOT    = 70  # extra space for full URL potentially wrapping 2 lines
+
+    TOTAL_H = (H_HEADER + H_STATS + H_GAP*2 +
+               H_SUM_HDR + H_SUM_BLK + H_GAP +
+               H_KP_HDR + H_KP + H_GAP +
+               H_ENT + H_CTX + H_FOOT + 30)
+
+    img  = Image.new("RGB", (W, TOTAL_H), PAPER)
+    draw = ImageDraw.Draw(img)
+
+    for x in range(0, W, 22):
+        for yy in range(0, TOTAL_H, 22):
+            draw.ellipse([x-1, yy-1, x+1, yy+1], fill=(200, 200, 192))
+
+    draw.rectangle([0, 0, W, 8], fill=ACCENT)
+
+    # LOGO
+    draw.text((PAD, 16), "News", font=f_logo, fill=INK)
+    nw = int(draw.textlength("News", font=f_logo))
+    draw.text((PAD+nw, 16), "Snap", font=f_logo, fill=ACCENT)
+    sw = int(draw.textlength("Snap", font=f_logo))
+    draw.text((PAD+nw+sw, 16), " AI", font=f_logo, fill=INK)
+    draw.text((PAD, 72), "AI-POWERED EDITORIAL ANALYSIS  ·  PASTE · READ · UNDERSTAND · EXPLORE",
+              font=f_mono, fill=INK3)
+    draw.rectangle([PAD, 98, W-PAD, 100], fill=INK)
+
+    y = 108
+
+    # STATS BAR
+    bh = 62
+    draw.rectangle([PAD, y, W-PAD, y+bh], fill=WHITE)
+    draw.rectangle([PAD, y, W-PAD, y+bh], outline=BORDER, width=1)
+    stats = [
+        (f"{rt}", "MIN READ"),
+        (f"{wc:,}", "WORDS"),
+        (domain[:24], "SOURCE"),
+        (category, "CATEGORY"),
+        (complexity, "COMPLEXITY"),
+        (sentiment.upper(), "SENTIMENT"),
+    ]
+    if lang_name != "English":
+        stats.append((lang_name, "LANGUAGE"))
+    ncols = len(stats)
+    col_w = INNER // ncols
+    for i, (val, lbl) in enumerate(stats):
+        cx = PAD + i*col_w + col_w//2
+        if i > 0:
+            draw.rectangle([PAD+i*col_w, y+8, PAD+i*col_w+1, y+bh-8], fill=BORDER)
+        color = SENT_COLORS.get(sentiment.lower(), INK3) if lbl == "SENTIMENT" else INK
+        vw = int(draw.textlength(val, font=f_small))
+        draw.text((cx-vw//2, y+8), val, font=f_small, fill=color)
+        lw = int(draw.textlength(lbl, font=f_mono))
+        draw.text((cx-lw//2, y+34), lbl, font=f_mono, fill=INK3)
+    y += bh + H_GAP
+
+    # SUMMARY
+    draw.rectangle([PAD, y, PAD+70, y+20], fill=ACCENT)
+    draw.text((PAD+5, y+3), "TL;DR", font=f_kick, fill=PAPER)
+    draw.text((PAD+82, y+3), "Summary", font=f_kick, fill=INK3)
+    y += H_SUM_HDR
+    draw.rectangle([PAD, y, W-PAD, y+H_SUM_BLK], fill=INK)
+    ty = y + 18
+    for line in sum_lines:
+        draw.text((PAD+20, ty), line, font=f_body, fill=(240, 240, 238))
+        ty += _line_h
+    y += H_SUM_BLK + H_GAP
+
+    # KEY POINTS
+    draw.text((PAD, y), "KEY POINTS", font=f_kick, fill=ACCENT)
+    draw.rectangle([PAD+100, y+7, W-PAD, y+8], fill=BORDER)
+    y += H_KP_HDR
+    for i, b_short in enumerate(bullet_rows, 1):
+        badge = f"0{i}"
+        bw = int(draw.textlength(badge, font=f_kick)) + 14
+        draw.rectangle([PAD, y+1, PAD+bw, y+21], fill=(240, 230, 228))
+        draw.text((PAD+4, y+3), badge, font=f_kick, fill=ACCENT)
+        draw.text((PAD+bw+10, y+3), b_short, font=f_small, fill=INK2)
+        y += _line_h - 2
+    y += H_GAP
+
+    # KEY ENTITIES
+    # Use f_small (language-aware) for entity names so non-Latin scripts render correctly.
+    if entities:
+        draw.text((PAD, y), "KEY ENTITIES", font=f_kick, fill=ACCENT)
+        draw.rectangle([PAD+112, y+7, W-PAD, y+8], fill=BORDER)
+        y += 24
+        ex = PAD
+        for e in entities[:6]:
+            if not isinstance(e, dict): continue
+            etype = e.get("type", "").upper()
+            name  = e.get("name", "")
+            tc = {"PERSON":(123,63,160),"ORG":(26,122,74),"PLACE":(58,110,168)}.get(etype, INK3)
+            badge_txt = f" {etype} · "
+            bw_badge = int(draw.textlength(badge_txt, font=f_mono))
+            nw_name  = int(draw.textlength(name + " ", font=f_small))
+            pw = bw_badge + nw_name + 12
+            if ex + pw > W - PAD - 40:
+                break
+            draw.rectangle([ex, y, ex+pw, y+26], fill=BORDER)
+            draw.text((ex+4, y+6), badge_txt, font=f_mono, fill=tc)
+            draw.text((ex+4+bw_badge, y+5), name, font=f_small, fill=tc)
+            ex += pw + 10
+        y += 34 + H_GAP
+
+    # BACKGROUND CONTEXT CARDS
+    if card_rows:
+        draw.text((PAD, y), "BACKGROUND CONTEXT", font=f_kick, fill=ACCENT)
+        draw.rectangle([PAD+168, y+7, W-PAD, y+8], fill=BORDER)
+        y += 24
+        card_w = (INNER - 20) // 3
+        _card_inner_w = card_w - 20  # usable text width inside each card
+        # Pre-compute wrapped lines using pixel-accurate wrap for each card
+        card_wrapped = []
+        for term, one_liner, exp in card_rows:
+            # Wrap term in f_kick (always ASCII/Latin OK), one_liner and exp in f_small (language-aware)
+            term_lines    = _pixel_wrap(_tmp_draw, term,      f_small,  _card_inner_w)
+            liner_lines   = _pixel_wrap(_tmp_draw, one_liner, f_small,  _card_inner_w)
+            exp_lines     = _pixel_wrap(_tmp_draw, exp,       f_small,  _card_inner_w)[:3]
+            card_wrapped.append((term_lines, liner_lines, exp_lines))
+        max_card_h = 0
+        for term_lines, liner_lines, exp_lines in card_wrapped:
+            h = 14 + len(term_lines)*20 + 8 + len(liner_lines)*18 + 8 + len(exp_lines)*18 + 14
+            max_card_h = max(max_card_h, h)
+        for i, ((term_lines, liner_lines, exp_lines), (term, one_liner, exp)) in enumerate(
+                zip(card_wrapped, card_rows)):
+            cx = PAD + i*(card_w+10)
+            draw.rectangle([cx, y, cx+card_w, y+max_card_h], fill=WHITE)
+            draw.rectangle([cx, y, cx+card_w, y+max_card_h], outline=BORDER, width=1)
+            draw.rectangle([cx, y, cx+card_w, y+3], fill=ACCENT)
+            cy = y + 10
+            draw.text((cx+8, cy), f"CONCEPT {i+1:02d}", font=f_mono, fill=ACCENT)
+            cy += 18
+            for tl in term_lines:
+                draw.text((cx+8, cy), tl, font=f_small, fill=INK)
+                cy += 20
+            for ll in liner_lines:
+                draw.text((cx+8, cy), ll, font=f_small, fill=INK2)
+                cy += 18
+            draw.rectangle([cx+8, cy, cx+card_w-8, cy+1], fill=BORDER)
+            cy += 6
+            for el in exp_lines:
+                draw.text((cx+8, cy), el, font=f_small, fill=INK3)
+                cy += 18
+        y += max_card_h + H_GAP
+
+    # FOOTER — show FULL URL wrapped across lines if needed
+    draw.rectangle([PAD, y, W-PAD, y+1], fill=BORDER)
+    y += 8
+    date_str = datetime.datetime.now().strftime("%d %b %Y · %H:%M")
+    dw = int(draw.textlength(date_str, font=f_mono))
+    draw.text((W-PAD-dw, y), date_str, font=f_mono, fill=INK3)
+    # Wrap full URL to fit within available width (INNER minus date width minus gap)
+    url_max_w = INNER - dw - 30
+    url_lines = _pixel_wrap(draw, url, f_mono, url_max_w) or [url]
+    url_y = y
+    for ul in url_lines:
+        draw.text((PAD, url_y), ul, font=f_mono, fill=ACCENT)
+        url_y += 18
+    y += max(26, len(url_lines) * 18)
+
+    final_h = y + 12
+    img = img.crop((0, 0, W, final_h))
+    draw2 = ImageDraw.Draw(img)
+    draw2.rectangle([0, final_h-8, W, final_h], fill=ACCENT)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
 def build_report(url, domain, result, entities, timeline, text):
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = ["="*70,"  NEWSSNAP AI — EDITORIAL ANALYSIS REPORT",f"  Generated: {now_str}","="*70,"",
@@ -436,9 +801,10 @@ def build_report(url, domain, result, entities, timeline, text):
     return "\n".join(lines)
 
 # ── INPUT ──
-st.markdown('<div class="reveal-1"><div class="input-zone"><div class="input-label">Paste a news article URL to analyse</div>', unsafe_allow_html=True)
-url = st.text_input(label="url", label_visibility="collapsed", placeholder="https://timesofindia.indiatimes.com/...")
-st.markdown('</div></div>', unsafe_allow_html=True)
+with _url_col:
+    st.markdown('<div class="reveal-1"><div class="input-zone"><div class="input-label">Paste a news article URL to analyse</div>', unsafe_allow_html=True)
+    url = st.text_input(label="url", label_visibility="collapsed", placeholder="https://timesofindia.indiatimes.com/...")
+    st.markdown('</div></div>', unsafe_allow_html=True)
 
 col1, col2 = st.columns([5, 1])
 with col1: generate = st.button("⚡  Analyse Article", use_container_width=True)
@@ -543,9 +909,53 @@ if cards:
     ch += '</div></div>'
     st.markdown(ch, unsafe_allow_html=True)
 
-# SUMMARY
+# SUMMARY — rendered via components.html so Streamlit cannot constrain its width
 st.markdown("""<div class="reveal-3"><div class="section-header"><span class="section-kicker">TL;DR</span><span class="section-title">&nbsp;Summary</span><div class="section-header-rule"></div></div></div>""", unsafe_allow_html=True)
-st.markdown(f'<div class="reveal-3"><div class="summary-block"><p>{result.get("summary","")}</p></div></div>', unsafe_allow_html=True)
+_summary_text = result.get("summary", "").replace('"', '&quot;').replace("'", "&#39;").replace('<', '&lt;').replace('>', '&gt;')
+components.html(f"""<!DOCTYPE html>
+<html><head><style>
+  *{{margin:0;padding:0;box-sizing:border-box;}}
+  body{{background:transparent;margin:0;padding:0;}}
+  .summary-block{{
+    background:#0d0d0f;
+    color:white;
+    padding:1.8rem 2rem;
+    border-radius:4px;
+    margin-bottom:0.5rem;
+    position:relative;
+    overflow:hidden;
+    width:100%;
+    display:block;
+  }}
+  .summary-block::before{{
+    content:'\201C';
+    position:absolute;
+    top:-0.5rem;
+    left:1.2rem;
+    font-family:Georgia,serif;
+    font-size:7rem;
+    color:rgba(255,255,255,0.07);
+    line-height:1;
+    pointer-events:none;
+  }}
+  .summary-block p{{
+    font-family:Georgia,'Times New Roman',serif;
+    font-size:1.1rem;
+    line-height:1.75;
+    color:rgba(255,255,255,0.92);
+    margin:0;
+    position:relative;
+    z-index:1;
+    width:100%;
+    display:block;
+    white-space:normal;
+    word-wrap:break-word;
+    overflow-wrap:break-word;
+  }}
+</style></head>
+<body>
+  <div class="summary-block"><p>{_summary_text}</p></div>
+</body></html>""", height=max(160, min(400, 80 + len(result.get("summary","")) // 3)), scrolling=False)
 
 # KEY POINTS + TIMELINE
 col_l, col_r = st.columns([3, 2])
@@ -602,18 +1012,134 @@ st.markdown(qh, unsafe_allow_html=True)
 
 # EXPORT
 st.markdown("""<div class="reveal-6"><div class="section-header"><span class="section-kicker">Download</span><span class="section-title">&nbsp;Export Report</span><div class="section-header-rule"></div></div></div>""", unsafe_allow_html=True)
-report = build_report(url, domain, result, entities, timeline, text)
-st.download_button(
-    label="⬇  Download Full Analysis Report (.txt)",
-    data=report.encode("utf-8"),
-    file_name=f"newssnap_{domain}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-    mime="text/plain", use_container_width=True,
-)
+st.markdown('''
+<div class="export-panel">
+  <div class="export-panel-row">
+    <div class="export-item">
+      <div class="export-icon">📄</div>
+      <div class="export-meta">
+        <div class="export-title">Full Analysis Report</div>
+        <div class="export-desc">Complete breakdown — summary, key points, timeline, entities</div>
+      </div>
+    </div>
+    <div class="export-item">
+      <div class="export-icon">🖼</div>
+      <div class="export-meta">
+        <div class="export-title">Share Card</div>
+        <div class="export-desc">Visual PNG card — ready to share on social or messaging</div>
+      </div>
+    </div>
+  </div>
+</div>
+''', unsafe_allow_html=True)
 
-st.markdown("""<div class="footer">
-  <span>NewsSnap AI</span>
-  <span>Powered by Groq · LLaMA 3.1 · Tavily Search</span>
-</div>""", unsafe_allow_html=True)
+_dl_col, _share_col = st.columns(2)
+
+with _dl_col:
+    report = build_report(url, domain, result, entities, timeline, text)
+    if st.button("📄  Generate Text Report", use_container_width=True):
+        st.session_state["_report_text"] = report
+    if "_report_text" in st.session_state:
+        with st.expander("📄 Report Preview — click to read & download", expanded=False):
+            st.code(st.session_state["_report_text"], language=None)
+            st.download_button(
+                label="⬇  Download .txt Report",
+                data=st.session_state["_report_text"].encode("utf-8"),
+                file_name=f"newssnap_{domain}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                mime="text/plain", use_container_width=True,
+            )
+
+with _share_col:
+    if PILLOW_AVAILABLE:
+        if st.button("🖼  Generate Share Card (.png)", use_container_width=True):
+            with st.spinner("Generating share card…"):
+                _NON_LATIN = {"hi", "ta", "bn", "te", "ar", "ja", "zh", "ko"}
+                if _saved_lang_code in _NON_LATIN:
+                    _card_result   = analyze_article(text, "en", "English")
+                    _card_cards    = generate_context_cards(text, "en", "English")
+                    _card_entities = extract_entities(text, "en", "English")
+                    _card_lang_code, _card_lang_name = "en", "English"
+                else:
+                    _card_result   = result
+                    _card_cards    = cards
+                    _card_entities = entities
+                    _card_lang_code, _card_lang_name = _saved_lang_code, _saved_lang_name
+
+                card_bytes = generate_share_card(
+                    summary    = _card_result.get("summary", ""),
+                    domain     = domain,
+                    category   = _card_result.get("category", "—"),
+                    sentiment  = _card_result.get("sentiment", "Neutral"),
+                    url        = url,
+                    bullets    = _card_result.get("bullets", []),
+                    complexity = _card_result.get("reading_complexity", ""),
+                    rt         = rt,
+                    wc         = wc,
+                    entities   = _card_entities,
+                    lang_name  = _card_lang_name,
+                    cards      = _card_cards,
+                    lang_code  = _card_lang_code,
+                )
+                st.session_state["_card_bytes"] = card_bytes
+        if "_card_bytes" in st.session_state:
+            with st.expander("🖼 Share Card Preview — click to view & download", expanded=False):
+                st.image(st.session_state["_card_bytes"], use_container_width=True)
+                st.download_button(
+                    label="⬇  Download Share Card (.png)",
+                    data=st.session_state["_card_bytes"],
+                    file_name=f"newssnap_card_{domain}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.png",
+                    mime="image/png",
+                    use_container_width=True,
+                )
+    else:
+        st.info("Install Pillow to enable share cards: `pip install pillow`")
+
+_footer_date = datetime.datetime.now().strftime('%d %b %Y · %H:%M')
+components.html(f"""<!DOCTYPE html>
+<html><head><style>
+  *{{margin:0;padding:0;box-sizing:border-box;font-family:'DM Sans',sans-serif;}}
+  body{{background:transparent;padding-top:1.5rem;}}
+  .footer{{
+    border-top:2px solid #0d0d0f;
+    padding-top:0.9rem;
+    display:flex;
+    flex-direction:column;
+    gap:0.45rem;
+    font-size:0.72rem;
+    color:#7a7a88;
+    letter-spacing:0.04em;
+  }}
+  .footer-top{{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:0.3rem;
+  }}
+  .footer-url{{
+    display:block;
+    word-break:break-all;
+    font-family:'JetBrains Mono',monospace;
+    font-size:0.68rem;
+    color:#c8392b;
+    text-decoration:none;
+    border-bottom:1px solid rgba(200,57,43,0.35);
+    padding-bottom:2px;
+    transition:opacity 0.15s;
+    cursor:pointer;
+  }}
+  .footer-url:hover{{opacity:0.7;}}
+</style></head>
+<body>
+  <div class="footer">
+    <div class="footer-top">
+      <span>NewsSnap AI</span>
+      <span>Powered by Groq · LLaMA 3.1 · Tavily Search</span>
+      <span>{_footer_date}</span>
+    </div>
+    <a class="footer-url" href="{url}" target="_blank" rel="noopener noreferrer">{url}</a>
+  </div>
+</body></html>""", height=90, scrolling=False)
 
 
 # ══════════════════════════════════════════════════════════════════════
